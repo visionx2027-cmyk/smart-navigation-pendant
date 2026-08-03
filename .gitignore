@@ -1,0 +1,6 @@
+__pycache__/
+*.pyc
+.vscode/
+
+*.pt
+!object_detection/yolov8m.pt
