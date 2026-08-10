@@ -5,7 +5,7 @@ import time
 sys.path.append(os.path.join(os.path.dirname(__file__), "..", "shared"))
 from voice import speak
 from vibration import vibrate_simulated
-from sensor import read_distance_simulated
+from sensor import read_distance_real, cleanup
 
 DANGER_ZONE = 30
 WARNING_ZONE = 100
@@ -14,13 +14,18 @@ last_zone = None
 last_speak_time = 0
 cooldown = 3
 
-print("Reading simulated obstacle distance. Press Ctrl+C to stop.")
+print("Reading REAL obstacle distance from HC-SR04. Press Ctrl+C to stop.")
 
 try:
     while True:
-        distance = read_distance_simulated()
-        print(f"Distance: {distance} cm")
+        distance = read_distance_real()
 
+        if distance is None:
+            print("No echo received (out of range or wiring issue)")
+            time.sleep(0.3)
+            continue
+
+        print(f"Distance: {distance} cm")
         current_time = time.time()
 
         if distance < DANGER_ZONE:
@@ -45,5 +50,9 @@ try:
             last_zone = zone
             last_speak_time = current_time
 
+        time.sleep(0.2)
+
 except KeyboardInterrupt:
     print("\nStopped.")
+finally:
+    cleanup()

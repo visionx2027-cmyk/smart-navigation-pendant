@@ -1,36 +1,57 @@
-import random
+import RPi.GPIO as GPIO
 import time
 
-# Holds the most recent distance reading so other modules can read it
-# without triggering a new reading themselves.
-_latest_distance_cm = 300  # safe default
+TRIG_PIN = 23   # GPIO23, physical pin 16
+ECHO_PIN = 24   # GPIO24, physical pin 18 — change if wired differently
+
+_latest_distance_cm = 300
+_gpio_initialized = False
 
 
-def read_distance_simulated():
-    """
-    Simulates an ultrasonic sensor reading.
-    NOT currently used by object_detection (camera-based estimate is used
-    instead until real hardware is connected) — kept here so the standalone
-    obstacle_detection module still works independently if you run it on
-    its own.
-    """
+def _init_gpio():
+    global _gpio_initialized
+    if _gpio_initialized:
+        return
+    GPIO.setmode(GPIO.BCM)
+    GPIO.setup(TRIG_PIN, GPIO.OUT)
+    GPIO.setup(ECHO_PIN, GPIO.IN)
+    GPIO.output(TRIG_PIN, False)
+    time.sleep(0.5)
+    _gpio_initialized = True
+
+
+def read_distance_real(timeout=0.04):
     global _latest_distance_cm
-    distance_cm = random.uniform(10, 300)
-    time.sleep(0.1)
+    _init_gpio()
+
+    GPIO.output(TRIG_PIN, True)
+    time.sleep(0.00001)
+    GPIO.output(TRIG_PIN, False)
+
+    start_time = time.time()
+    stop_time = time.time()
+    timeout_start = time.time()
+
+    while GPIO.input(ECHO_PIN) == 0:
+        start_time = time.time()
+        if start_time - timeout_start > timeout:
+            return None
+
+    timeout_start = time.time()
+    while GPIO.input(ECHO_PIN) == 1:
+        stop_time = time.time()
+        if stop_time - timeout_start > timeout:
+            return None
+
+    elapsed = stop_time - start_time
+    distance_cm = (elapsed * 34300) / 2
     _latest_distance_cm = round(distance_cm, 1)
     return _latest_distance_cm
 
 
 def get_latest_distance_m():
-    """Returns the last known distance in meters."""
     return _latest_distance_cm / 100
 
 
-def read_distance_real():
-    """
-    PLACEHOLDER for Monday — real HC-SR04 reading via GPIO.
-    Once wired up, this replaces the camera-based estimate in
-    object_detection/main.py. Fill in with the GPIO TRIG/ECHO code
-    once hardware is confirmed working.
-    """
-    raise NotImplementedError("Wire this up once HC-SR04 is connected on Monday")
+def cleanup():
+    GPIO.cleanup()
