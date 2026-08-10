@@ -1,3 +1,44 @@
+"""
+main.py
+-------
+Smart Blind Navigation Pendant — Real-Time Face Recognition Module
+
+Architecture notes (mirrors the fixes made in register_face.py):
+
+1. MATCHING STRATEGY: For each detected face we compute distances to
+   EVERY stored encoding of EVERY person (not one encoding per person).
+   We then take the k nearest neighbors overall and let them vote on
+   identity, breaking ties by lowest average distance. This is what
+   actually lets a 20-30 degree turn get recognized: if the person's
+   "Turn Left" registration samples are close to the current frame,
+   they win the vote even though their "Look Straight" sample might be
+   far. A single "closest match" against averaged/blended encodings
+   (the likely previous design) throws that signal away.
+
+2. TOLERANCE: 0.60 as a hard cutoff on a single distance is fragile.
+   Here tolerance is used as a filter on which neighbors are even
+   eligible to vote (default 0.58, slightly tighter than 0.60 to avoid
+   false accepts now that we have far more candidate encodings per
+   person to compare against), and identity is decided by voting
+   + margin, not by the raw closest distance alone.
+
+3. MARGIN CHECK: if the best-matching person and the second-best
+   person are separated by too small a distance margin, we treat the
+   result as ambiguous rather than risking a wrong announcement.
+
+4. ENCODING MODEL MATCHES REGISTRATION: model="large" is used here too
+   — mismatched landmark models between registration and recognition
+   would reintroduce the alignment problem.
+
+5. TEMPORAL SMOOTHING: a single frame's recognition can flicker
+   (motion blur, brief occlusion). We keep a short rolling history per
+   face track and only announce once a label is consistent across
+   several consecutive frames, with a cooldown so the same person
+   isn't announced every frame.
+
+6. NON-BLOCKING VOICE: TTS runs on a background thread so it never
+   stalls the camera loop (important for a real-time navigation aid).
+"""
 
 import os
 import cv2
@@ -27,7 +68,16 @@ MARGIN_THRESHOLD = 0.03         # min distance gap vs runner-up to accept
 
 SMOOTHING_WINDOW = 6            # frames of history per track
 CONSISTENCY_REQUIRED = 4        # how many of the last N frames must agree
-ANNOUNCE_COOLDOWN_SEC = 8.0     # don't re-announce the same name too often
+ANNOUNCE_COOLDOWN_SEC = 8.0     # don't re-announce the same name+direction too often
+
+# Direction zones as a fraction of frame width. A face center within the
+# middle band is "in front of you"; outside it, "left"/"right". Assumes the
+# camera faces the same direction as the wearer (not a mirrored selfie feed) —
+# left in the frame = left of the person wearing the pendant.
+DIRECTION_LEFT_BOUND = 0.40
+DIRECTION_RIGHT_BOUND = 0.60
+DIRECTION_SMOOTHING_WINDOW = 4
+DIRECTION_CONSISTENCY_REQUIRED = 3
 
 FRAME_WIDTH = 640
 FRAME_HEIGHT = 480
@@ -57,9 +107,19 @@ class Voice:
 # --------------------------------------------------------------------------
 # Database
 # --------------------------------------------------------------------------
+EXPECTED_ENCODING_LENGTH = 128
+
+
 def load_database():
     """Returns (names_array, encodings_matrix) flattened for vectorized
-    distance computation. names_array[i] corresponds to encodings_matrix[i]."""
+    distance computation. names_array[i] corresponds to encodings_matrix[i].
+
+    Defensive against malformed/legacy pickle contents: some earlier version
+    of the registration script may have stored a single flat encoding per
+    name instead of a list of encodings, or a run may have been interrupted
+    mid-save. Rather than crash on np.array() with an inhomogeneous shape,
+    we validate every entry and skip anything that isn't a clean 128-d
+    vector, warning about what got skipped."""
     if not os.path.exists(ENCODINGS_PATH):
         raise FileNotFoundError(
             f"No encodings found at {ENCODINGS_PATH}. Run register_face.py first."
@@ -69,15 +129,37 @@ def load_database():
 
     names = []
     encodings = []
+    skipped = 0
+
     for name, enc_list in db.items():
+        # Legacy format safety: if enc_list is actually a single encoding
+        # (a flat array/list of length 128) rather than a list of encodings,
+        # wrap it so it's iterated correctly instead of iterating floats.
+        if isinstance(enc_list, np.ndarray) and enc_list.ndim == 1:
+            enc_list = [enc_list]
+
         for enc in enc_list:
-            names.append(name)
-            encodings.append(enc)
+            arr = np.asarray(enc, dtype=np.float64)
+            if arr.ndim == 1 and arr.shape[0] == EXPECTED_ENCODING_LENGTH:
+                names.append(name)
+                encodings.append(arr)
+            else:
+                skipped += 1
+
+    if skipped:
+        print(f"[WARN] Skipped {skipped} malformed encoding entr"
+              f"{'y' if skipped == 1 else 'ies'} in {ENCODINGS_PATH} "
+              f"(wrong shape — likely from an old/incompatible registration run). "
+              f"Consider deleting the file and re-running register_face.py "
+              f"if this number looks large.")
 
     if not encodings:
-        raise ValueError("Encoding database is empty. Register at least one person.")
+        raise ValueError(
+            f"No valid encodings found in {ENCODINGS_PATH}. "
+            f"Delete it and run register_face.py again."
+        )
 
-    return np.array(names), np.array(encodings)
+    return np.array(names), np.stack(encodings)
 
 
 # --------------------------------------------------------------------------
@@ -131,6 +213,34 @@ def identify_face(face_encoding, known_names, known_encodings):
 
 
 # --------------------------------------------------------------------------
+# Direction estimation: where is this face relative to the wearer?
+#
+# We use the horizontal position of the face's bounding-box center within
+# the frame, not just the raw center point, so it's independent of how
+# SimpleTracker groups detections. Assumes the camera faces outward in the
+# same direction the wearer is facing (see config note above) — if you
+# later add a wide-angle or multi-camera setup this mapping will need to
+# change accordingly.
+# --------------------------------------------------------------------------
+def estimate_direction(left, right, frame_width):
+    face_center_x = (left + right) / 2.0
+    fraction = face_center_x / frame_width
+    if fraction < DIRECTION_LEFT_BOUND:
+        return "left"
+    elif fraction > DIRECTION_RIGHT_BOUND:
+        return "right"
+    return "center"
+
+
+def direction_phrase(name, direction):
+    if direction == "left":
+        return f"{name} is on your left"
+    elif direction == "right":
+        return f"{name} is on your right"
+    return f"{name} is in front of you"
+
+
+# --------------------------------------------------------------------------
 # Simple centroid-based tracker so smoothing survives minor frame-to-frame
 # movement of the same face (good enough for a single-user pendant; for
 # multi-face scenes each track gets its own smoothing history).
@@ -140,7 +250,8 @@ class FaceTrack:
         self.id = track_id
         self.center = center
         self.history = deque(maxlen=SMOOTHING_WINDOW)
-        self.last_announced = None
+        self.direction_history = deque(maxlen=DIRECTION_SMOOTHING_WINDOW)
+        self.last_announced = None  # (name, direction) tuple
         self.last_announced_time = 0.0
 
     def update_center(self, center):
@@ -148,6 +259,9 @@ class FaceTrack:
 
     def push_result(self, name):
         self.history.append(name)
+
+    def push_direction(self, direction):
+        self.direction_history.append(direction)
 
     def stable_name(self):
         if len(self.history) < CONSISTENCY_REQUIRED:
@@ -158,14 +272,29 @@ class FaceTrack:
             return name
         return None
 
-    def should_announce(self, name):
+    def stable_direction(self):
+        """Majority direction over a short window. Falls back to the most
+        recent single reading if there isn't enough history yet or the
+        window is split — direction should stay responsive since the
+        person may be walking past, unlike identity which we want to be
+        conservative about."""
+        if not self.direction_history:
+            return "center"
+        counts = Counter(self.direction_history)
+        direction, count = counts.most_common(1)[0]
+        if count >= DIRECTION_CONSISTENCY_REQUIRED:
+            return direction
+        return self.direction_history[-1]
+
+    def should_announce(self, name, direction):
         now = time.time()
-        if name == self.last_announced and (now - self.last_announced_time) < ANNOUNCE_COOLDOWN_SEC:
+        current = (name, direction)
+        if current == self.last_announced and (now - self.last_announced_time) < ANNOUNCE_COOLDOWN_SEC:
             return False
         return True
 
-    def mark_announced(self, name):
-        self.last_announced = name
+    def mark_announced(self, name, direction):
+        self.last_announced = (name, direction)
         self.last_announced_time = time.time()
 
 
@@ -259,15 +388,21 @@ def run():
                     track = tracks[i]
                     track.push_result(name)
 
-                    stable = track.stable_name()
-                    display_label = stable if stable else "Analyzing..."
+                    top, right, bottom, left = face_locations[i]
+                    direction = estimate_direction(left, right, FRAME_WIDTH)
+                    track.push_direction(direction)
+                    stable_direction = track.stable_direction()
 
-                    if stable and stable != "Unknown" and track.should_announce(stable):
-                        voice.say_async(f"{stable} is in front of you")
-                        track.mark_announced(stable)
+                    stable_name = track.stable_name()
+                    display_label = stable_name if stable_name else "Analyzing..."
+
+                    if stable_name and track.should_announce(stable_name, stable_direction):
+                        voice.say_async(direction_phrase(stable_name, stable_direction))
+                        track.mark_announced(stable_name, stable_direction)
 
                     dist_str = f"{distance:.3f}" if distance is not None else "n/a"
-                    labels.append(f"{display_label if stable else 'Unknown'} ({dist_str})")
+                    label_text = display_label if stable_name else "Unknown"
+                    labels.append(f"{label_text} ({dist_str}) [{stable_direction}]")
 
                 last_face_locations = face_locations
                 last_labels = labels
