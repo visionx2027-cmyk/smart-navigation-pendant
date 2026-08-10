@@ -1,57 +1,43 @@
-import RPi.GPIO as GPIO
+import lgpio
 import time
 
-TRIG_PIN = 23   # GPIO23, physical pin 16
-ECHO_PIN = 24   # GPIO24, physical pin 18 — change if wired differently
+TRIG_PIN = 23
+ECHO_PIN = 24
 
-_latest_distance_cm = 300
-_gpio_initialized = False
+chip = lgpio.gpiochip_open(0)
 
-
-def _init_gpio():
-    global _gpio_initialized
-    if _gpio_initialized:
-        return
-    GPIO.setmode(GPIO.BCM)
-    GPIO.setup(TRIG_PIN, GPIO.OUT)
-    GPIO.setup(ECHO_PIN, GPIO.IN)
-    GPIO.output(TRIG_PIN, False)
-    time.sleep(0.5)
-    _gpio_initialized = True
+lgpio.gpio_claim_output(chip, TRIG_PIN, 0)
+lgpio.gpio_claim_input(chip, ECHO_PIN)
 
 
 def read_distance_real(timeout=0.04):
-    global _latest_distance_cm
-    _init_gpio()
-
-    GPIO.output(TRIG_PIN, True)
+    # Send 10 microsecond trigger pulse
+    lgpio.gpio_write(chip, TRIG_PIN, 1)
     time.sleep(0.00001)
-    GPIO.output(TRIG_PIN, False)
+    lgpio.gpio_write(chip, TRIG_PIN, 0)
+
+    start_wait = time.time()
+
+    # Wait for echo to become HIGH
+    while lgpio.gpio_read(chip, ECHO_PIN) == 0:
+        if time.time() - start_wait > timeout:
+            return None
 
     start_time = time.time()
-    stop_time = time.time()
-    timeout_start = time.time()
 
-    while GPIO.input(ECHO_PIN) == 0:
-        start_time = time.time()
-        if start_time - timeout_start > timeout:
+    # Wait for echo to become LOW
+    while lgpio.gpio_read(chip, ECHO_PIN) == 1:
+        if time.time() - start_time > timeout:
             return None
 
-    timeout_start = time.time()
-    while GPIO.input(ECHO_PIN) == 1:
-        stop_time = time.time()
-        if stop_time - timeout_start > timeout:
-            return None
+    elapsed = time.time() - start_time
 
-    elapsed = stop_time - start_time
     distance_cm = (elapsed * 34300) / 2
-    _latest_distance_cm = round(distance_cm, 1)
-    return _latest_distance_cm
 
-
-def get_latest_distance_m():
-    return _latest_distance_cm / 100
+    return round(distance_cm, 1)
 
 
 def cleanup():
-    GPIO.cleanup()
+    lgpio.gpio_free(chip, TRIG_PIN)
+    lgpio.gpio_free(chip, ECHO_PIN)
+    lgpio.gpiochip_close(chip)
