@@ -1,9 +1,13 @@
-import pyttsx3
+import socket
+
+LAPTOP_IP = "192.168.1.42"   # <-- your laptop's real IP
+LAPTOP_PORT = 5005
+
+sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 
 def speak(text):
-    """Speaks the given text out loud."""
-    engine = pyttsx3.init()
-    engine.setProperty('rate', 160)
-    engine.say(text)
-    engine.runAndWait()
-    engine.stop()
+    """Sends text to laptop over WiFi to be spoken aloud."""
+    try:
+        sock.sendto(text.encode(), (LAPTOP_IP, LAPTOP_PORT))
+    except Exception as e:
+        print(f"Failed to send audio text: {e}")
