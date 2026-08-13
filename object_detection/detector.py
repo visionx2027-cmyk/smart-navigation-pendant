@@ -33,7 +33,7 @@ def estimate_distance_m(smoothed_relative_size):
 
 
 def run_yolo_and_update_cache(frame):
-    results = model(frame, conf=0.6, verbose=False)
+    results = model(frame, conf=0.35, verbose=False)
     boxes = results[0].boxes
     frame_width = frame.shape[1]
     seen_labels = set()
