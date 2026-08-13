@@ -11,6 +11,7 @@ import pyttsx3
 # --------------------------------------------------------------------------
 KNOWN_FACES_DIR = "known_faces"
 ENCODINGS_PATH = os.path.join(KNOWN_FACES_DIR, "encodings.pkl")
+PHOTO_DIR = os.path.join(KNOWN_FACES_DIR, "friend_photos")
 
 # Poses to capture. Each is (label_for_display, voice_instruction).
 POSES = [
@@ -169,6 +170,105 @@ def _draw_status(frame, text: str):
 # --------------------------------------------------------------------------
 # Main registration flow
 # --------------------------------------------------------------------------
+def register_from_photos():
+    """Register people using existing photos instead of the camera."""
+
+    db = load_database()
+
+    if not os.path.exists(PHOTO_DIR):
+        print(f"[ERROR] Photo folder not found: {PHOTO_DIR}")
+        return
+
+    total_added = 0
+
+    # Each subfolder represents one person
+    for person_name in os.listdir(PHOTO_DIR):
+
+        person_folder = os.path.join(PHOTO_DIR, person_name)
+
+        if not os.path.isdir(person_folder):
+            continue
+
+        print(f"\n[INFO] Processing photos for: {person_name}")
+
+        new_encodings = []
+
+        for filename in os.listdir(person_folder):
+
+            if not filename.lower().endswith(
+                (".jpg", ".jpeg", ".png")
+            ):
+                continue
+
+            image_path = os.path.join(person_folder, filename)
+
+            print(f"[INFO] Processing: {filename}")
+
+            image = cv2.imread(image_path)
+
+            if image is None:
+                print(f"[WARN] Could not read {filename}")
+                continue
+
+            # Same image preprocessing used by your camera registration
+            image = apply_clahe(image)
+
+            rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+
+            # Detect faces
+            face_locations = face_recognition.face_locations(
+                rgb,
+                number_of_times_to_upsample=UPSAMPLE_TIMES,
+                model=DETECTION_MODEL
+            )
+
+            # We need exactly one face in each photo
+            if len(face_locations) != 1:
+                print(
+                    f"[WARN] {filename}: "
+                    f"expected 1 face, found {len(face_locations)}"
+                )
+                continue
+
+            # Generate face encoding
+            encodings = face_recognition.face_encodings(
+                rgb,
+                known_face_locations=[face_locations[0]],
+                num_jitters=REGISTRATION_JITTERS,
+                model=ENCODING_MODEL
+            )
+
+            if not encodings:
+                print(f"[WARN] No encoding generated for {filename}")
+                continue
+
+            new_encodings.append(encodings[0])
+
+            print(f"[OK] Encoding created for {person_name}")
+
+        # Add encodings to database
+        if new_encodings:
+
+            db.setdefault(person_name, [])
+            db[person_name].extend(new_encodings)
+
+            print(
+                f"[SUCCESS] Added {len(new_encodings)} "
+                f"photos for {person_name}"
+            )
+
+            total_added += len(new_encodings)
+
+        else:
+            print(f"[WARN] No valid photos found for {person_name}")
+
+    save_database(db)
+
+    print("\n====================================")
+    print("PHOTO REGISTRATION COMPLETE")
+    print(f"Total new encodings: {total_added}")
+    print(f"Database saved to: {ENCODINGS_PATH}")
+    print("====================================")
 def register_person():
     voice = Voice()
     name = input("Enter the person's name: ").strip()
@@ -217,4 +317,18 @@ def register_person():
 
 
 if __name__ == "__main__":
-    register_person()
+
+    print("\nFace Registration")
+    print("1. Register using camera")
+    print("2. Register using existing photos")
+
+    choice = input("Choose an option (1/2): ").strip()
+
+    if choice == "1":
+        register_person()
+
+    elif choice == "2":
+        register_from_photos()
+
+    else:
+        print("Invalid choice.")
