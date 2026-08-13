@@ -1,6 +1,6 @@
 import socket
 
-LAPTOP_IP = "192.168.1.42"   # <-- your laptop's real IP
+LAPTOP_IP = "192.168.0.151"   # <-- your laptop's real IP
 LAPTOP_PORT = 5005
 
 sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
