@@ -10,26 +10,22 @@ model = YOLO("yolov8s.pt")
 
 LEFT_ZONE_END = 1 / 3
 RIGHT_ZONE_START = 2 / 3
-NAVIGATION_OBJECTS = ["person", "car", "bus", "motorcycle"]
+NAVIGATION_OBJECTS = ["person", "car", "bus", "motorcycle", "bicycle"]
 
 size_history = {}
 detection_cache = {}
 
 
 def get_direction(center_x, frame_width):
+    # Raw left/center/right — matches recognizer.py's vocabulary so
+    # main.py's decision layer can build every message the same way,
+    # regardless of whether it came from face recognition or object
+    # detection.
     if center_x < frame_width * LEFT_ZONE_END:
-        return "on your left"
+        return "left"
     elif center_x > frame_width * RIGHT_ZONE_START:
-        return "on your right"
-    return "ahead"
-
-
-def estimate_distance_m(smoothed_relative_size):
-    if smoothed_relative_size > 0.5:
-        return 0.4
-    elif smoothed_relative_size > 0.25:
-        return 1.5
-    return 3.0
+        return "right"
+    return "center"
 
 
 def run_yolo_and_update_cache(frame):
@@ -68,14 +64,19 @@ def run_yolo_and_update_cache(frame):
 
 
 def get_object_events():
-    """Returns a list of dicts describing every currently cached object."""
+    """Returns a list of dicts describing every currently cached object.
+    NOTE: distance/"getting closer" is no longer derived here from bbox
+    size -- that was the root cause of false approach warnings. Approach
+    detection now lives entirely in main.py, driven by the ultrasonic
+    sensor's rolling history. smoothed_size is kept in the cache only in
+    case you want it later (e.g. scaling vibration intensity), but it no
+    longer feeds any spoken message.
+    """
     events = []
     for label, data in detection_cache.items():
-        if label in NAVIGATION_OBJECTS:
-            distance_m = estimate_distance_m(data["smoothed_size"])
-            events.append({"label": label, "direction": data["direction"],
-                            "distance_m": distance_m, "is_nav": True})
-        else:
-            events.append({"label": label, "direction": data["direction"],
-                            "distance_m": None, "is_nav": False})
+        events.append({
+            "label": label,
+            "direction": data["direction"],
+            "is_nav": label in NAVIGATION_OBJECTS,
+        })
     return events
