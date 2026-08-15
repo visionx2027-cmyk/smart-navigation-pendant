@@ -1,16 +1,34 @@
 import socket
 import pyttsx3
 
-sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-sock.bind(("0.0.0.0", 5005))
+HOST = "0.0.0.0"
+PORT = 5005
 
-print("Laptop TTS server listening on port 5005...")
+server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+server.bind((HOST, PORT))
+server.listen(5)
+
+print(f"Laptop TTS server listening on TCP port {PORT}...")
+
 while True:
-    data, addr = sock.recvfrom(2048)
-    text = data.decode()
-    print(f"Speaking: {text}")
-    engine = pyttsx3.init()      # fresh engine each time
-    engine.setProperty('rate', 160)
-    engine.say(text)
-    engine.runAndWait()
-    engine.stop()
+    conn, addr = server.accept()
+
+    try:
+        data = conn.recv(2048)
+
+        if data:
+            text = data.decode("utf-8")
+            print(f"Speaking: {text}")
+
+            engine = pyttsx3.init()
+            engine.setProperty("rate", 160)
+            engine.say(text)
+            engine.runAndWait()
+            engine.stop()
+
+    except Exception as e:
+        print(f"TTS error: {e}")
+
+    finally:
+        conn.close()
